@@ -26,6 +26,9 @@ export const useComparison = ({
   const previewToCompare = ref(null)
   const comparisonPreviewIndex = ref(0)
   const comparisonMode = ref('sidebyside')
+  const wipePosition = ref(0.5)
+  const wipeAngle = ref(0)
+  const wipeDistance = ref(0)
 
   // Map of available preview files indexed by id, populated from
   // entityPreviewFiles whenever taskTypeId changes. Kept outside Vue
@@ -50,7 +53,8 @@ export const useComparison = ({
     { label: `${t('playlists.actions.overlay')} 25%`, value: 'overlay25' },
     { label: `${t('playlists.actions.overlay')} 50%`, value: 'overlay50' },
     { label: `${t('playlists.actions.overlay')} 75%`, value: 'overlay75' },
-    { label: `${t('playlists.actions.overlay')} 100%`, value: 'overlay100' }
+    { label: `${t('playlists.actions.overlay')} 100%`, value: 'overlay100' },
+    { label: 'Wipe', value: 'wipe' }
   ])
 
   const comparisonPreview = computed(() => {
@@ -204,6 +208,8 @@ export const useComparison = ({
     previewToCompare,
     comparisonPreviewIndex,
     comparisonMode,
+    wipePosition,
+    wipeAngle,
 
     // Computed
     comparisonModeOptions,

@@ -3,9 +3,12 @@
     <div class="preview filler">
       <div class="flexrow filler">
         <div
-          class="preview-container filler"
-          :style="{ cursor: annotationCursor || null }"
-          ref="preview-container"
+            class="preview-container filler"
+            ref="preview-container"
+            @pointerdown.capture="onWipePointerDown"
+            @pointermove.capture="onPreviewPointerMove"
+            @pointerup.capture="onWipePointerUp"
+            @dragstart.prevent
         >
           <div
             class="annotation-slot"
@@ -64,6 +67,32 @@
               @resized="onComparisonCanvasResized"
             />
           </div>
+        <div
+            v-if="isComparisonWipe"
+            class="wipe-debug-overlay"
+            :style="comparisonViewerStyle"
+        />
+
+        <div
+            v-if="isComparisonWipe"
+            class="wipe-divider"
+            :class="{
+                dragging: dragMode !== null,
+                hover: isHoveringWipe
+            }"
+            :style="wipeLineStyle"
+        >
+            <div class="wipe-line"></div>
+        </div>
+
+        <div
+            v-if="isComparisonWipe"
+            class="wipe-handle move"
+            :style="{
+                ...wipeMoveHandleStyle,
+                cursor: isRotateModifierPressed ? 'crosshair' : 'grab'
+            }"
+        />
           <div class="viewers">
             <preview-viewer
               ref="preview-viewer"
@@ -117,9 +146,7 @@
               :is-repeating="isRepeating"
               :margin-bottom="marginBottom"
               :preview="comparisonPreview"
-              :style="{
-                opacity: overlayOpacity
-              }"
+              :style="comparisonViewerStyle"
               @panzoom-ready="onComparisonPanzoomReady"
               @video-loaded="onComparisonVideoLoaded"
               v-show="
@@ -656,6 +683,17 @@ const objectBackgroundUrl = ref(null)
 const pencilPalette = ref(['huge', 'big', 'medium', 'small', 'tiny'])
 const videoDuration = ref(0)
 const width = ref(0)
+const isHoveringWipe = ref(false)
+const dragMode = ref(null)
+const isRotateModifierPressed = ref(false)
+// null | 'move' | 'rotate'
+const rotateStartMouseY = ref(0)
+const rotateStartAngle = ref(0)
+const rotateGeometry = ref(null)
+const previousMouseY = ref(0)
+const rotateDistance = ref(0)
+const wipeOffset = ref(0)
+const rotatePivot = ref(null)
 
 // Vuex getters
 // Declared before `useAnnotation` so the composable can consume them; the
@@ -765,6 +803,7 @@ watch(onionSkinFrames, value =>
   localPreferences.setPreference('player:onionSkinFrames', value)
 )
 
+
 // Computed
 
 const currentFrameLabel = computed(() => {
@@ -811,6 +850,8 @@ const {
   previewToCompare,
   comparisonPreviewIndex,
   comparisonMode,
+  wipePosition,
+  wipeAngle,
   comparisonModeOptions,
   comparisonPreview,
   comparisonPreviewLength,
@@ -855,8 +896,529 @@ const allowExtraPreview = computed(
 // slot in the container; in overlay mode they stack and the comparison
 // annotation canvas is hidden anyway.
 const isSideBySideComparison = computed(
-  () => isComparing.value && !isComparisonOverlay.value
+  () => isComparing.value && comparisonMode.value === 'sidebyside'
 )
+
+const isComparisonWipe = computed(
+  () => isComparing.value && comparisonMode.value === 'wipe'
+)
+
+function onKeyDown(event) {
+
+    if (event.code === 'KeyR') {
+        isRotateModifierPressed.value = true
+    }
+
+}
+
+function onKeyUp(event) {
+
+    if (event.code === 'KeyR') {
+        isRotateModifierPressed.value = false
+    }
+
+}
+
+onMounted(() => {
+
+    window.addEventListener('keydown', onKeyDown)
+    window.addEventListener('keyup', onKeyUp)
+
+})
+
+onBeforeUnmount(() => {
+
+    window.removeEventListener('keydown', onKeyDown)
+    window.removeEventListener('keyup', onKeyUp)
+
+})
+
+const wipeCursor = computed(() => {
+
+    if (isRotateModifierPressed.value) {
+        return 'crosshair'
+    }
+
+    return 'grab'
+})
+
+function buildWipeClipPath() {
+
+    if (!previewContainer.value) return 'none'
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const g = getWipeGeometry()
+
+    if (!g) return 'none'
+
+    // During rotation, freeze the pivot point so the clip mask and
+    // the CSS line rotate around the same anchor.  getWipeGeometry()
+    // would otherwise recompute (x, y) from wipePosition × the
+    // angle-dependent projection range, causing a growing offset.
+    const cx =
+        dragMode.value === 'rotate' && rotatePivot.value
+            ? rotatePivot.value.x
+            : g.x
+    const cy =
+        dragMode.value === 'rotate' && rotatePivot.value
+            ? rotatePivot.value.y
+            : g.y
+
+    const nx = g.normal.x
+    const ny = g.normal.y
+
+    const corners = [
+        { x: 0, y: 0 },
+        { x: rect.width, y: 0 },
+        { x: rect.width, y: rect.height },
+        { x: 0, y: rect.height }
+    ]
+
+    const polygon = []
+
+      const EPSILON = 0.5
+
+      for (const p of corners) {
+
+          const d = (p.x - cx) * nx + (p.y - cy) * ny
+
+          if (d <= EPSILON) {
+
+              polygon.push(p)
+
+          }
+
+    }
+
+    const edges = [
+        [corners[0], corners[1]],
+        [corners[1], corners[2]],
+        [corners[2], corners[3]],
+        [corners[3], corners[0]]
+    ]
+
+    for (const [a, b] of edges) {
+
+        const da = (a.x - cx) * nx + (a.y - cy) * ny
+        const db = (b.x - cx) * nx + (b.y - cy) * ny
+
+        if ((da < 0 && db > 0) || (da > 0 && db < 0)) {
+
+            const t = da / (da - db)
+
+            polygon.push({
+                x: a.x + (b.x - a.x) * t,
+                y: a.y + (b.y - a.y) * t
+            })
+
+        }
+
+    }
+
+    if (polygon.length < 3) return 'none'
+
+    const center = polygon.reduce(
+        (c, p) => ({ x: c.x + p.x, y: c.y + p.y }),
+        { x: 0, y: 0 }
+    )
+
+    center.x /= polygon.length
+    center.y /= polygon.length
+
+    polygon.sort((a, b) => {
+
+        const aa = Math.atan2(a.y - center.y, a.x - center.x)
+        const ab = Math.atan2(b.y - center.y, b.x - center.x)
+
+        return aa - ab
+
+    })
+
+    console.log({
+      angle: wipeAngle.value,
+      point: { x: cx, y: cy },
+      normal: g.normal,
+      polygon
+  })
+
+    return `polygon(${polygon
+        .map(p => `${(p.x / rect.width) * 100}% ${(p.y / rect.height) * 100}%`)
+        .join(',')})`
+
+}
+
+const comparisonViewerStyle = computed(() => {
+
+    if (!isComparisonWipe.value) {
+
+        return {
+            opacity: overlayOpacity.value
+        }
+
+    }
+
+    return {
+
+        clipPath: buildWipeClipPath(),
+
+        WebkitClipPath: buildWipeClipPath()
+
+    }
+
+})
+
+const wipeLineStyle = computed(() => {
+
+    const g =
+    dragMode.value === 'rotate' && rotatePivot.value
+        ? {
+            ...getWipeGeometry(),
+            x: rotatePivot.value.x,
+            y: rotatePivot.value.y
+        }
+        : getWipeGeometry()
+
+    if (!g) return {}
+
+    return {
+
+        left: `${g.x}px`,
+        top: `${g.y}px`,
+
+        transform: `
+            
+            rotate(${wipeAngle.value}deg)
+        `
+
+    }
+
+})
+
+const wipeMoveHandleStyle = computed(() => {
+
+    const g =
+        dragMode.value === 'rotate' && rotatePivot.value
+            ? rotatePivot.value
+            : getWipeGeometry()
+
+    if (!g) return {}
+
+    return {
+
+        left: `${g.x}px`,
+        top: `${g.y}px`,
+
+        transform: 'translate(-50%, -50%)'
+
+    }
+
+})
+
+const wipeRotateHandleStyle = computed(() => {
+
+    const g = getWipeGeometry()
+
+    if (!g) return {}
+
+    const offset = 40
+
+    return {
+
+        left: `${g.x - g.tangent.x * offset}px`,
+        top: `${g.y - g.tangent.y * offset}px`,
+
+        transform: 'translate(-50%, -50%)'
+
+    }
+
+})
+
+function getWipeHandlePosition() {
+
+    if (!previewContainer.value) return null
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const centerX = rect.width * 0.5
+    const centerY = rect.height * 0.5
+
+    const normal = getWipeNormal()
+
+    const { min, max } = getWipeProjectionRange(rect)
+
+    const distance =
+        min + wipePosition.value * (max - min)
+
+    return {
+
+        centerX,
+        centerY,
+        normal,
+        distance,
+
+        x: centerX + normal.x * distance,
+        y: centerY + normal.y * distance
+    }
+
+}
+
+function getWipeGeometry() {
+
+    if (!previewContainer.value) return null
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const centerX = rect.width * 0.5
+    const centerY = rect.height * 0.5
+
+    const normal = getWipeNormal()
+
+    const tangent = {
+        x: -normal.y,
+        y: normal.x
+    }
+
+    
+
+    const { min, max } = getWipeProjectionRange(rect)
+
+    const distance =
+      min + wipePosition.value * (max - min)
+
+    const x = centerX + normal.x * distance
+    const y = centerY + normal.y * distance
+
+    return {
+        x,
+        y,
+        normal,
+        tangent
+    }
+
+}
+
+function getCssGradientAngle(angle) {
+    return angle + 90
+}
+
+function getWipeNormal() {
+
+    const theta = wipeAngle.value * Math.PI / 180
+
+    return {
+        x: Math.cos(theta),
+        y: Math.sin(theta)
+    }
+
+}
+
+function getWipeProjectionRange(rect) {
+
+    const normal = getWipeNormal()
+
+    const corners = [
+        [-rect.width / 2, -rect.height / 2],
+        [ rect.width / 2, -rect.height / 2],
+        [-rect.width / 2,  rect.height / 2],
+        [ rect.width / 2,  rect.height / 2]
+    ]
+
+    let min = Infinity
+    let max = -Infinity
+
+    for (const [x, y] of corners) {
+
+        const p = x * normal.x + y * normal.y
+
+        min = Math.min(min, p)
+        max = Math.max(max, p)
+    }
+
+    return { min, max }
+}
+
+const onGlobalSelectStart = event => {
+    if (isComparisonWipe.value) {
+        event.preventDefault()
+    }
+}
+
+const onGlobalDragStart = event => {
+    if (isComparisonWipe.value) {
+        event.preventDefault()
+    }
+}
+
+function onWipePointerDown(event) {
+
+    if (!isComparisonWipe.value) return
+    if (!isPointerNearMoveHandle(event)) return
+
+    event.preventDefault()
+    event.stopPropagation()
+
+    // Clear any existing text selection that may have been initiated
+    // by the browser's default drag behavior on media elements.
+    window.getSelection().removeAllRanges()
+
+    dragMode.value = isRotateModifierPressed.value
+        ? 'rotate'
+        : 'move'
+
+    if (dragMode.value === 'rotate') {
+
+        previousMouseY.value = event.clientY
+
+        const g = getWipeGeometry()
+
+        rotatePivot.value = {
+            x: g.x,
+            y: g.y
+        }
+    }
+
+    event.currentTarget.setPointerCapture(event.pointerId)
+}
+
+function onWipePointerUp(event) {
+
+    dragMode.value = null
+
+    if (event.currentTarget.hasPointerCapture(event.pointerId)) {
+        event.currentTarget.releasePointerCapture(event.pointerId)
+    }
+}
+
+function onPreviewPointerMove(event) {
+
+    if (!isComparisonWipe.value) return
+
+    if (dragMode.value) {
+        event.preventDefault()
+    }
+
+    switch (dragMode.value) {
+
+        case 'move':
+            updateWipePosition(event)
+            return
+
+        case 'rotate':
+            updateWipeAngle(event)
+            return
+
+    }
+
+    isHoveringWipe.value =
+        isPointerNearMoveHandle(event) ||
+        isPointerNearRotateHandle(event) ||
+        isPointerNearWipe(event)
+}
+
+function updateWipeAngle(event) {
+
+    const sensitivity = 0.5
+
+    const deltaY = previousMouseY.value - event.clientY
+
+    wipeAngle.value += deltaY * sensitivity
+
+    previousMouseY.value = event.clientY
+
+    // Recompute wipePosition from the frozen pivot so the line
+    // doesn't jump when the user releases the mouse (dragMode → null
+    // triggers a full geometry recalculation from wipePosition × angle).
+    if (rotatePivot.value && previewContainer.value) {
+        const rect = previewContainer.value.getBoundingClientRect()
+        const normal = getWipeNormal()
+        const { min, max } = getWipeProjectionRange(rect)
+        const centerX = rect.width * 0.5
+        const centerY = rect.height * 0.5
+        const distance =
+            (rotatePivot.value.x - centerX) * normal.x +
+            (rotatePivot.value.y - centerY) * normal.y
+        wipePosition.value = Math.min(1, Math.max(0, (distance - min) / (max - min)))
+    }
+}
+function isPointerNearMoveHandle(event) {
+
+    const g = getWipeGeometry()
+
+    if (!g || !previewContainer.value) return false
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const dx = (event.clientX - rect.left) - g.x
+    const dy = (event.clientY - rect.top) - g.y
+
+    return dx * dx + dy * dy < 16 * 16
+}
+function isPointerNearRotateHandle(event) {
+
+    const g = getWipeGeometry()
+
+    if (!g || !previewContainer.value) return false
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const offset = 40
+
+    const x = g.x - g.tangent.x * offset
+    const y = g.y - g.tangent.y * offset
+
+    const dx = (event.clientX - rect.left) - x
+    const dy = (event.clientY - rect.top) - y
+
+    return dx * dx + dy * dy < 16 * 16
+}
+
+
+function updateWipePosition(event) {
+
+    if (!previewContainer.value) return
+
+    const rect = previewContainer.value.getBoundingClientRect()
+
+    const centerX = rect.width * 0.5
+    const centerY = rect.height * 0.5
+
+    const px = event.clientX - rect.left
+    const py = event.clientY - rect.top
+
+    const normal = getWipeNormal()
+
+    // Vector desde el centro al ratón
+    const dx = px - centerX
+    const dy = py - centerY
+
+    // Proyección sobre la normal
+    const distance =
+        dx * normal.x +
+        dy * normal.y
+
+    const { min, max } = getWipeProjectionRange(rect)
+
+    wipePosition.value = Math.min(
+        1,
+        Math.max(
+            0,
+            (distance - min) / (max - min)
+        )
+    )
+
+}
+
+function isPointerNearWipe(event) {
+
+  if (!previewContainer.value) return false
+
+  const rect = previewContainer.value.getBoundingClientRect()
+
+  const wipeX = rect.left + wipePosition.value * rect.width
+
+  return Math.abs(event.clientX - wipeX) < 12
+}
 
 const marginBottom = computed(() => {
   let margin = 32
@@ -1037,7 +1599,14 @@ const setVideoFrameContext = frame => {
     if (!isPlaying.value) loadAnnotation()
     if (isPlaying.value && hasTrimEnd.value && frame >= handleOut.value) {
       if (isRepeating.value) {
-        seekTrimStart()
+        // Loop from the frame START (see the play() jump) and repaint the
+        // bar at the loop target right away: on this tick the playing
+        // channel has already filled past the handle-out marker.
+        const startTime = trimStartFrame.value * frameDuration.value
+        pendingTrimSeek = true
+        previewViewer.value.setCurrentTimeRaw(startTime)
+        comparisonViewer.value?.setCurrentTimeRaw(startTime)
+        progress.value?.updateProgressBar(trimStartFrame.value - 1)
       } else {
         pause()
         setCurrentFrame(handleOut.value)
@@ -1153,26 +1722,6 @@ const getCurrentFrame = () => {
   return Math.round(time / frameDuration.value) + 1
 }
 
-// Restart seek shared by the manual replay and the repeat loop. Seeks the
-// START of the trim frame, not the usual mid-frame (setCurrentFrame):
-// starting mid-frame only shows half of the handle-in frame, which reads
-// as playing one frame late. Also wraps the displayed frame right away:
-// the first playback emission after the seek lands is ceil+1-based
-// (~start + 2), so the counter would visibly restart a few frames in.
-const seekTrimStart = () => {
-  const startTime = trimStartFrame.value * frameDuration.value
-  pendingTrimSeek = true
-  previewViewer.value.setCurrentTimeRaw(startTime)
-  comparisonViewer.value?.setCurrentTimeRaw(startTime)
-  currentFrame.value = trimStartFrame.value
-  currentTimeRaw.value = startTime
-  currentTime.value = formatTime(startTime, fps.value)
-  emit('frame-updated', trimStartFrame.value)
-  // park the fill ON the start frame (paused convention), so the playback
-  // repaints that resume at ~start + 2 read as a continuous 1, 2, 3…
-  progress.value?.updateProgressBar(trimStartFrame.value)
-}
-
 const play = () => {
   isPlaying.value = true
   isDrawing.value = false
@@ -1186,7 +1735,13 @@ const play = () => {
         currentFrame.value >= endFrame ||
         currentFrame.value < trimStartFrame.value
       ) {
-        seekTrimStart()
+        // Seek the START of the trim frame, not the usual mid-frame
+        // (setCurrentFrame): starting mid-frame only shows half of the
+        // handle-in frame, which reads as playing one frame late.
+        const startTime = trimStartFrame.value * frameDuration.value
+        pendingTrimSeek = true
+        previewViewer.value.setCurrentTimeRaw(startTime)
+        comparisonViewer.value?.setCurrentTimeRaw(startTime)
       }
       previewViewer.value.play()
       if (comparisonViewer.value && isComparing.value) {
@@ -1785,9 +2340,6 @@ const snapshotTitle = identity =>
 // annotation's frame with its drawing composited on top.
 const extractVideoAnnotationSnapshots = async ({ withLabel = false } = {}) => {
   const files = []
-  // The loop below seeks the player around (extractVideoFrame goes through
-  // setCurrentFrame), so save the user's frame now to restore it at the end.
-  const cur = currentFrame.value
   const sortedAnnotations = annotations.value.sort((a, b) => {
     return parseInt(b.frame) < parseInt(a.frame) ? 1 : -1
   })
@@ -1806,13 +2358,9 @@ const extractVideoAnnotationSnapshots = async ({ withLabel = false } = {}) => {
   }
   // currentFrame is 0-based here (unlike PlaylistPlayer's 1-based label
   // this restore was copied from): no -1, or the playhead steps back.
-  previewViewer.value.setCurrentFrame(cur)
+  previewViewer.value.setCurrentFrame(currentFrame.value)
   nextTick(() => {
-    // Repaint the annotation of the restored frame: the loop used the live
-    // canvas as scratch space, and clearing without reloading left the
-    // user's drawing gone until the next frame change.
     clearCanvas()
-    loadAnnotation()
   })
   return files
 }
@@ -1860,13 +2408,7 @@ const extractPicturePreviewSnapshots = async ({ withLabel = false } = {}) => {
     currentIndex.value = savedIndex
     await new Promise(resolve => setTimeout(resolve, 500))
   }
-  // Repaint the current preview's annotation rather than leaving the
-  // live canvas cleared (the drawing otherwise vanishes until the next
-  // preview change).
-  nextTick(() => {
-    clearCanvas()
-    loadAnnotation()
-  })
+  nextTick(() => clearCanvas())
   return files
 }
 
@@ -2107,6 +2649,16 @@ const onContainerMouseDown = event => {
   // focused textarea — Shift+Tab then thinks the user is "in the
   // comment block" and ping-pongs them back to the player.
   if (event.button === 0) container.value?.focus()
+
+  // Prevent native HTML5 image/video drag and text selection in wipe
+  // mode.  The browser initiates a drag on mousedown (separate from
+  // pointerdown) and the only reliable way to suppress it is to call
+  // preventDefault() at capture phase on the container element.
+  if (isComparisonWipe.value) {
+    event.preventDefault()
+    return
+  }
+
   const isDrawingTool =
     isDrawing.value || isShapeMode.value || isEraserModeOn.value
   if (
@@ -2502,6 +3054,13 @@ onMounted(() => {
   previewContainer.value?.addEventListener('mousedown', onContainerMouseDown, {
     capture: true
   })
+  document.addEventListener('selectstart', onGlobalSelectStart)
+  window.addEventListener('dragstart', onGlobalDragStart, true)
+  // Prevent native HTML5 image/video drag in wipe mode:
+  // set draggable=false on all media elements inside the container.
+  for (const el of previewContainer.value?.querySelectorAll?.('video, img') ?? []) {
+    el.setAttribute('draggable', 'false')
+  }
 })
 
 onBeforeUnmount(() => {
@@ -2518,6 +3077,8 @@ onBeforeUnmount(() => {
   document.removeEventListener('mouseup', onScrubEnd)
   containerResizeObserver?.disconnect()
   containerResizeObserver = null
+  document.removeEventListener('selectstart', onGlobalSelectStart)
+  window.removeEventListener('dragstart', onGlobalDragStart, true)
 })
 
 // Player API (passed to TaskInfo via :player prop)
@@ -2802,10 +3363,19 @@ defineExpose({
 .preview-container {
   position: relative;
   overflow: hidden;
+  user-select: none;
+  -webkit-user-drag: none;
+  touch-action: none;
   // Horizontal drags inside the player (Shift+drag scrub, Alt+drag pan)
   // would otherwise let Chrome's two-finger swipe navigate back / forward
   // and drop any unsaved comment — issue #1700.
   overscroll-behavior-x: contain;
+}
+
+.preview-container img,
+.preview-container video {
+  -webkit-user-drag: none;
+  user-select: none;
 }
 
 .viewers {
@@ -2851,4 +3421,74 @@ defineExpose({
 #annotation-snapshot {
   display: none;
 }
+
+.wipe-divider {
+    position: absolute;
+    pointer-events: none;
+    z-index: 100;
+}
+
+.wipe-line {
+
+    position: absolute;
+
+    left: 50%;
+    top: 50%;
+
+    width: 2px;
+    height: 2000px;
+
+    background: white;
+
+    transform: translate(-50%, -50%);
+
+    box-shadow: 0 0 4px rgba(0,0,0,.7);
+}
+
+.wipe-handle {
+
+    position:absolute;
+
+    width:16px;
+    height:16px;
+
+    border-radius:50%;
+
+    background:white;
+    border:2px solid #555;
+
+    z-index:101;
+    pointer-events:none;
+
+}
+
+.wipe-divider.hover {
+    background: #66b7ff;
+}
+
+.wipe-divider.hover .wipe-handle {
+
+    transform:
+        translate(-50%, -50%)
+        scale(1.15);
+
+    box-shadow:
+        0 0 10px rgba(80,170,255,.6),
+        inset 0 1px 1px rgba(255,255,255,.8);
+}
+
+.wipe-debug-overlay {
+
+    position: absolute;
+
+    inset: 0;
+
+    z-index: 90;
+
+    opacity: 0;
+
+    
+
+}
+
 </style>
