@@ -10,12 +10,20 @@
       >
         <div class="has-text-centered login-header">
           <img
+            v-if="mainConfig.branding?.has_logo"
+            :src="mainConfig.branding.logo"
+            :alt="mainConfig.branding.name"
+          />
+
+          <img
+            v-else-if="isDarkTheme"
             src="../../assets/kitsu-text-dark.svg"
             alt="Kitsu"
-            v-if="isDarkTheme"
           />
-          <img src="../../assets/kitsu-text.svg" alt="Kitsu" v-else />
+
+          <img v-else src="../../assets/kitsu-text.svg" alt="Kitsu" />
         </div>
+
         <form v-if="!(isMissingOTP || isWrongOTP)">
           <div class="field" v-if="mainConfig?.saml_enabled">
             <p class="control">
@@ -24,6 +32,7 @@
               </a>
             </p>
           </div>
+
           <div class="field" v-if="mainConfig?.oidc_enabled">
             <p class="control">
               <a class="button is-fullwidth" href="/api/auth/oidc/login">
@@ -31,6 +40,7 @@
               </a>
             </p>
           </div>
+
           <div class="field mt2">
             <p class="control has-icon">
               <input
@@ -48,6 +58,7 @@
               </span>
             </p>
           </div>
+
           <div class="field">
             <p class="control has-icon">
               <input
@@ -65,6 +76,7 @@
             </p>
           </div>
         </form>
+
         <two-factor-authentication
           v-if="isMissingOTP || isWrongOTP"
           :preferred-two-fa="preferredTwoFA"
@@ -75,6 +87,7 @@
           @validate="confirmLogIn"
           @changed-two-fa="changedTwoFA"
         />
+
         <p v-if="!(isMissingOTP || isWrongOTP)" class="control">
           <a
             class="button main-button is-fullwidth"
@@ -90,12 +103,15 @@
             {{ $t('login.login') }}
           </a>
         </p>
+
         <p class="control error" v-if="isServerError">
           {{ $t('login.login_server_failed') }}
         </p>
+
         <p class="control error" v-else-if="isTooMuchLoginFailedAttemps">
           {{ $t('login.too_many_failed_login_attemps') }}
         </p>
+
         <p
           class="control error"
           v-else-if="isLoginError && !isMissingOTP && !isWrongOTP"

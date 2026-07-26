@@ -5,6 +5,7 @@
     <image-cropper
       ref="cropperRef"
       :shape="shape"
+      output-type="image/png"
       @fileselected="onFileSelected"
     />
 
